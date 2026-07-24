@@ -8,6 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 arti-client = "0.44.0"
+chrono = "0.4.45"
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["tokio-macros", "net", "rt"] }
 uniffi = { version = "0.32.0", features = ["cli"] }

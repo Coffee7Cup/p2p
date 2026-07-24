@@ -1,14 +1,34 @@
-use std::collections::VecDeque;
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
-use crate::models::Message;
+use crate::{errors::PTPError, models::FrontendMsg};
 
-struct IncommingMsgQueue {
-    queue: VecDeque<Message>,
+struct WorkQueue {
+    sender: Sender<FrontendMsg>,
+    receiver: Receiver<FrontendMsg>,
 }
 
-// TODO:see wht errors can happen here, and handle them
-impl IncommingMsgQueue {
-    pub fn dequeue(&mut self) -> Message {
-        self.queue.pop_front();
+impl WorkQueue {
+    pub fn new(limit: usize) -> Self {
+        let (s, r) = mpsc::channel(limit);
+        Self {
+            sender: s,
+            receiver: r,
+        }
+    }
+
+    pub fn producer(&self) -> Sender<FrontendMsg> {
+        self.sender.clone()
+    }
+
+    pub fn enqueue(&self, msg: FrontendMsg) -> Result<(), PTPError> {
+        self.sender
+            .try_send(msg)
+            .map_err(|_| PTPError::QueueBufferOverflowError)
+    }
+
+    pub async fn process_works(&mut self) {
+        while let Some(msg) = self.receiver.recv().await {
+            match msg {}
+        }
     }
 }

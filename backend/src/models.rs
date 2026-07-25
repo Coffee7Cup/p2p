@@ -17,17 +17,19 @@ pub enum BackendMsg {
     TorConnectionStatus,
 }
 
-pub struct ChatMsg<'a> {
-    id: ,
-    Sender: ,
-    time: DateTime<Utc>,
-    contant: &'a str,
-}
+pub enum ErrorMsg {}
 
-pub struct Chat {}
-
-impl ChatMsg {
-    pub fn  create_id (){
-        // TODO: Here, the hash sender dateTime etc to create a simple and fast hash
-    }
-}
+// pub struct ChatMsg<'a> {
+//     id: ,
+//     Sender: ,
+//     time: DateTime<Utc>,
+//     contant: &'a str,
+// }
+//
+// pub struct Chat {}
+//
+// impl ChatMsg {
+//     pub fn  create_id (){
+//         // TODO: Here, the hash sender dateTime etc to create a simple and fast hash
+//     }
+// }

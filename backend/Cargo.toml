@@ -7,11 +7,15 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-arti-client = "0.44.0"
+arti-client = { version = "0.44.0", features = [
+  "onion-service-service",
+  "onion-service-client",
+] }
 chrono = "0.4.45"
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["tokio-macros", "net", "rt"] }
 uniffi = { version = "0.32.0", features = ["cli"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 
 [build-dependencies]
 uniffi = { version = "0.32.0", features = ["build"] }

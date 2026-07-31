@@ -5,8 +5,8 @@ use crate::{
     models::{BackendMsg, ErrorMsg, FrontendMsg},
 };
 
-// TODO:remember to push the pending tasks to the error to be processed later or to intimatate the frontend
-// TODO:maybe add a interface so that i can match types easyly "process_works"
+// TODO: #1 - remember to push the pending tasks to the error to be processed later or to intimatate the frontend
+// TODO: #2 - maybe add a interface so that i can match types easyly "process_works"
 
 struct WorkQueue<T> {
     sender: Sender<T>,

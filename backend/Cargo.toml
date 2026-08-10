@@ -18,6 +18,8 @@ uniffi = { version = "0.32.0", features = ["cli"] }
 rusqlite = { version = "0.36.0", features = ["bundled"] }
 tor-rtcompat = "0.45.0"
 tor-hsservice = "0.45.0"
+tokio-tungstenite = "0.30.0"
+futures = "0.3.33"
 
 [build-dependencies]
 uniffi = { version = "0.32.0", features = ["build"] }

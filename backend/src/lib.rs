@@ -10,6 +10,8 @@ struct Greeter {
     name: String,
 }
 
+pub type Result<T> = Result<T, errors::P2PError>;
+
 #[uniffi::export]
 impl Greeter {
     #[uniffi::constructor]

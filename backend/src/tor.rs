@@ -1,7 +1,10 @@
 use futures::StreamExt;
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_tungstenite::{accept_async, client_async};
+use std::{collections::HashMap, sync::Arc};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::{Mutex, mpsc},
+};
+use tokio_tungstenite::{accept_async, client_async, tungstenite::Message};
 use tor_rtcompat::tokio::TokioNativeTlsRuntime;
 
 use arti_client::{
@@ -19,7 +22,7 @@ pub struct Client {
 }
 
 impl Client {
-    /// Constructs and initializes a new Arti P2P client instance
+    /// Until the cache and state dir are not changed the onion address will not changed
     pub async fn new(state_dir: String, cache_dir: String) -> Result<Self> {
         let tor_client = onion_client(state_dir, cache_dir).await?;
         Ok(Self {
@@ -29,7 +32,6 @@ impl Client {
         })
     }
 
-    /// Hosts a hidden service on this client and starts listening for connections
     pub async fn start_service(&mut self, nickname: String) -> Result<String> {
         let (service, address) = host_onion_service(self.tor_client.clone(), nickname).await?;
         self.onion_service = Some(service);
@@ -59,15 +61,88 @@ pub async fn onion_client(
 
     let runtime = TokioNativeTlsRuntime::current().map_err(|_| P2PError::TorConnectioError)?;
 
-    // Pass runtime and config to bootstrap
-    let client = TorClient::create_bootstrapped(runtime, config)
+    let client = TorClient::create_bootstrapped(config)
         .await
         .map_err(|_| P2PError::TorConnectioError)?;
-
     Ok(Arc::new(client))
 }
 
+/// Hosts an Onion Service and spawns a background listener loop to accept multiple incoming streams
+pub async fn host_onion_service(
+    client: Arc<TorClient<TokioNativeTlsRuntime>>,
+    nickname: String,
+) -> Result<(Arc<RunningOnionService>, String)> {
+    let service_config = OnionServiceConfig::builder()
+        .nickname(
+            nickname
+                .parse()
+                .map_err(|_| P2PError::OnionConnectioError)?,
+        )
+        .build()
+        .map_err(|_| P2PError::OnionConnectioError)?;
+
+    // Launch service and retrieve the incoming stream handle
+    let (service, stream_requests) = client
+        .launch_onion_service(service_config)
+        .await
+        .map_err(|_| P2PError::OnionConnectioError)?;
+
+    let onion_address = service
+        .onion_name()
+        .ok_or(P2PError::OnionConnectioError)?
+        .to_string();
+
+    // Convert rendition stream requests into incoming streams
+    let stream_handle = tor_hsservice::handle_rend_requests(stream_requests);
+
+    // Spawn an async background loop to accept multiple connections
+    tokio::spawn(handle_incoming_connections(stream_handle));
+
+    Ok((service, onion_address))
+}
+
+/// Connection loop accepting incoming client streams and upgrading to WebSockets or handling raw streams
+///the futures streme is like iterator, u call .next().await?
+async fn handle_incoming_connections(
+    mut stream_handle: impl futures::Stream<Item = tor_hsservice::RendRequest> + Unpin + Send + 'static,
+) {
+    while let Some(rend_request) = stream_handle.next().await {
+        tokio::spawn(async move {
+            // Accept the incoming rendezvous request to obtain an anonymized DataStream
+            let stream = match rend_request.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+
+            // Upgrade incoming connection to WebSocket
+            if let Ok(mut ws_stream) = accept_async(stream).await {
+                while let Some(msg) = ws_stream.next().await {
+                    match msg {
+                        Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                            // Process text frame or echo back
+                            let _ = ws_stream
+                                .send(tokio_tungstenite::tungstenite::Message::Text(
+                                    format!("Echo: {}", text).into(),
+                                ))
+                                .await;
+                        }
+                        Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
+                        _ => {}
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Helper function to retrieve an address directly from a RunningOnionService instance
+pub fn get_onion_address(service: &RunningOnionService) -> Option<String> {
+    service.onion_address().map(|name| name.to_string())
+}
+
 /// Connects to a remote .onion address via standard TCP or upgrades to a WebSocket stream
+/// i guess i have to use wss since the tor only uses TLS.
+/// TODO: should i return the writer and reader ?
 pub async fn connect_to_onion_address(
     client: Arc<TorClient<TokioNativeTlsRuntime>>,
     address: String,
@@ -85,6 +160,8 @@ pub async fn connect_to_onion_address(
     if use_websocket {
         // Upgrade the Tor DataStream to a persistent WebSocket client
         let ws_url = format!("ws://{}", target);
+        // the client_async is used here since the docs says that the client_async is used typically
+        // for the connections already having tcp connection
         let (mut ws_stream, _) = client_async(ws_url, stream)
             .await
             .map_err(|_| P2PError::TorConnectioError)?;
@@ -115,75 +192,19 @@ pub async fn connect_to_onion_address(
     Ok(())
 }
 
-/// Hosts an Onion Service and spawns a background listener loop to accept multiple incoming streams
-pub async fn host_onion_service(
-    client: Arc<TorClient<TokioNativeTlsRuntime>>,
-    nickname: String,
-) -> Result<(Arc<RunningOnionService>, String)> {
-    let service_config = OnionServiceConfig::builder()
-        .nickname(
-            nickname
-                .parse()
-                .map_err(|_| P2PError::OnionConnectioError)?,
-        )
-        .build()
-        .map_err(|_| P2PError::OnionConnectioError)?;
+type Ppl = Arc<Mutex<HashMap<String, mpsc::Sender<Message>>>>;
 
-    // Launch service and retrieve the incoming stream handle
-    let (service, stream_requests) = client
-        .launch_onion_service(service_config)
-        .await
-        .map_err(|_| P2PError::OnionConnectioError)?;
-
-    let onion_address = service
-        .onion_name()
-        .ok_or(P2PError::OnionConnectioError)?
-        .to_string();
-
-    // Convert rendition stream requests into incoming streams
-    let stream_handle = tor_hsservice::handle_onion_service_stream(stream_requests);
-
-    // Spawn an async background loop to accept multiple connections
-    tokio::spawn(handle_incoming_connections(stream_handle));
-
-    Ok((service, onion_address))
+struct Chats {
+    chats: Ppl,
+    tor_client: TorClient<TokioNativeTlsRuntime>,
 }
 
-/// Connection loop accepting incoming client streams and upgrading to WebSockets or handling raw streams
-async fn handle_incoming_connections(
-    mut stream_handle: impl futures::Stream<Item = tor_hsservice::RendRequest> + Unpin + Send + 'static,
-) {
-    while let Some(rend_request) = stream_handle.next().await {
-        tokio::spawn(async move {
-            // Accept the incoming rendezvous request to obtain an anonymized DataStream
-            let stream = match rend_request.accept().await {
-                Ok(s) => s,
-                Err(_) => return,
-            };
+// For chats im yet to decide is i want to initilize the tor_client here or to keep them as
+// separate entities, (may be A P2PMaster will have client and chat lets see)
+impl Chats {
+    pub fn new() -> Self {}
 
-            // Upgrade incoming connection to WebSocket
-            if let Ok(mut ws_stream) = accept_async(stream).await {
-                while let Some(msg) = ws_stream.next().await {
-                    match msg {
-                        Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                            // Process text frame or echo back
-                            let _ = ws_stream
-                                .send(tokio_tungstenite::tungstenite::Message::Text(format!(
-                                    "Echo: {}",
-                                    text
-                                )))
-                                .await;
-                        }
-                        Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
-                        _ => {}
-                    }
-                }
-            }
-        });
-    }
-}
+    pub fn connect_to_peer() {}
 
-/// Helper function to retrieve an address directly from a RunningOnionService instance
-pub fn get_onion_address(service: &RunningOnionService) -> Option<String> {
-    service.onion_name().map(|name| name.to_string())
+    pub fn process_peer_msgs() {}
 }

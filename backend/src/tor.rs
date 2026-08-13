@@ -1,10 +1,13 @@
-use futures::StreamExt;
-use std::{collections::HashMap, sync::Arc};
+use futures::{SinkExt, StreamExt};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{Mutex, mpsc},
 };
-use tokio_tungstenite::{accept_async, client_async, tungstenite::Message};
+use tokio_tungstenite::{WebSocketStream, accept_async, client_async, tungstenite::Message};
 use tor_rtcompat::tokio::TokioNativeTlsRuntime;
 
 use arti_client::{
@@ -14,11 +17,21 @@ use tor_hsservice::RunningOnionService;
 
 use crate::{Result, errors::P2PError};
 
+// Type aliases for WebSocket read/write halves over Tor stream
+type TorDataStream = arti_client::DataStream;
+type WsWriter = futures::stream::SplitSink<WebSocketStream<TorDataStream>, Message>;
+type WsReader = futures::stream::SplitStream<WebSocketStream<TorDataStream>>;
+
+/// Channel handle used to push messages to an active peer connection loop
+pub type PeerTx = mpsc::Sender<Message>;
+
 /// Managed Arti client state
 pub struct Client {
     pub tor_client: Arc<TorClient<TokioNativeTlsRuntime>>,
     pub onion_service: Option<Arc<RunningOnionService>>,
     pub onion_address: Option<String>,
+    // Persistent active chat connections indexed by target onion address
+    pub active_chats: Arc<RwLock<HashMap<String, PeerTx>>>,
 }
 
 impl Client {
@@ -29,11 +42,23 @@ impl Client {
             tor_client,
             onion_service: None,
             onion_address: None,
+            active_chats: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
-    pub async fn start_service(&mut self, nickname: String) -> Result<String> {
-        let (service, address) = host_onion_service(self.tor_client.clone(), nickname).await?;
+    pub async fn start_service(
+        &mut self,
+        nickname: String,
+        msg_tx_to_app: mpsc::Sender<(String, Message)>,
+    ) -> Result<String> {
+        let (service, address) = host_onion_service(
+            self.tor_client.clone(),
+            nickname,
+            self.active_chats.clone(),
+            msg_tx_to_app,
+        )
+        .await?;
+
         self.onion_service = Some(service);
         self.onion_address = Some(address.clone());
         Ok(address)
@@ -43,27 +68,44 @@ impl Client {
     pub fn get_onion_address(&self) -> Option<String> {
         self.onion_address.clone()
     }
+
+    /// Send a message to an existing chat or connect if not present
+    pub async fn send_message(&self, target_address: &str, port: u16, msg: Message) -> Result<()> {
+        let mut chats = self.active_chats.lock().await;
+
+        if let Some(tx) = chats.get(target_address) {
+            tx.send(msg)
+                .await
+                .map_err(|_| P2PError::TorConnectioError)?;
+            Ok(())
+        } else {
+            Err(P2PError::TorConnectioError)
+        }
+    }
 }
 
 /// Initializes and bootstraps the Arti Tor client runtime
 pub async fn onion_client(
-    state_dir: String,
-    cache_dir: String,
+    state_dir: &str,
+    cache_dir: &str,
 ) -> Result<Arc<TorClient<TokioNativeTlsRuntime>>> {
     let mut config_builder = TorClientConfig::builder();
 
-    config_builder.storage().state_dir(CfgPath::new(state_dir));
-    config_builder.storage().cache_dir(CfgPath::new(cache_dir));
+    config_builder
+        .storage()
+        .state_dir(CfgPath::new_literal(state_dir));
+    config_builder
+        .storage()
+        .cache_dir(CfgPath::new_literal(cache_dir));
 
     let config = config_builder
         .build()
         .map_err(|_| P2PError::TorConnectioError)?;
 
-    let runtime = TokioNativeTlsRuntime::current().map_err(|_| P2PError::TorConnectioError)?;
-
     let client = TorClient::create_bootstrapped(config)
         .await
         .map_err(|_| P2PError::TorConnectioError)?;
+
     Ok(Arc::new(client))
 }
 
@@ -71,6 +113,8 @@ pub async fn onion_client(
 pub async fn host_onion_service(
     client: Arc<TorClient<TokioNativeTlsRuntime>>,
     nickname: String,
+    active_chats: Arc<RwLock<HashMap<String, PeerTx>>>,
+    msg_tx_to_app: mpsc::Sender<(String, Message)>,
 ) -> Result<(Arc<RunningOnionService>, String)> {
     let service_config = OnionServiceConfig::builder()
         .nickname(
@@ -81,7 +125,7 @@ pub async fn host_onion_service(
         .build()
         .map_err(|_| P2PError::OnionConnectioError)?;
 
-    // Launch service and retrieve the incoming stream handle
+    // Launch service and retrieve incoming requests
     let (service, stream_requests) = client
         .launch_onion_service(service_config)
         .await
@@ -92,44 +136,64 @@ pub async fn host_onion_service(
         .ok_or(P2PError::OnionConnectioError)?
         .to_string();
 
-    // Convert rendition stream requests into incoming streams
     let stream_handle = tor_hsservice::handle_rend_requests(stream_requests);
 
-    // Spawn an async background loop to accept multiple connections
-    tokio::spawn(handle_incoming_connections(stream_handle));
+    // Spawn async background loop to accept incoming peer connections
+    tokio::spawn(handle_incoming_connections(
+        stream_handle,
+        active_chats,
+        msg_tx_to_app,
+    ));
 
-    Ok((service, onion_address))
+    Ok((Arc::new(service), onion_address))
 }
 
-/// Connection loop accepting incoming client streams and upgrading to WebSockets or handling raw streams
-///the futures streme is like iterator, u call .next().await?
+/// Connection loop accepting incoming client streams and upgrading to WebSockets
 async fn handle_incoming_connections(
     mut stream_handle: impl futures::Stream<Item = tor_hsservice::RendRequest> + Unpin + Send + 'static,
+    active_chats: Arc<RwLock<HashMap<String, PeerTx>>>,
+    msg_tx_to_app: mpsc::Sender<(String, Message)>,
 ) {
     while let Some(rend_request) = stream_handle.next().await {
+        let active_chats = active_chats.clone();
+        let msg_tx_to_app = msg_tx_to_app.clone();
+
         tokio::spawn(async move {
-            // Accept the incoming rendezvous request to obtain an anonymized DataStream
             let stream = match rend_request.accept().await {
                 Ok(s) => s,
                 Err(_) => return,
             };
 
-            // Upgrade incoming connection to WebSocket
-            if let Ok(mut ws_stream) = accept_async(stream).await {
-                while let Some(msg) = ws_stream.next().await {
-                    match msg {
-                        Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                            // Process text frame or echo back
-                            let _ = ws_stream
-                                .send(tokio_tungstenite::tungstenite::Message::Text(
-                                    format!("Echo: {}", text).into(),
-                                ))
-                                .await;
-                        }
-                        Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
-                        _ => {}
-                    }
+            if let Ok(ws_stream) = accept_async(stream).await {
+                let (mut ws_writer, mut ws_reader) = ws_stream.split();
+                let (tx, mut rx) = mpsc::channel::<Message>(100);
+
+                // Placeholder identity until peer registers address during handshake
+                let peer_id = format!("peer_{}", rand::random::<u32>());
+
+                {
+                    active_chats.lock().await.insert(peer_id.clone(), tx);
                 }
+
+                // Writer Loop: Flushes outbound messages to network
+                tokio::spawn(async move {
+                    while let Some(msg) = rx.recv().await {
+                        if ws_writer.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+
+                // Reader Loop: Reads incoming frames and pushes to App Daemon
+                while let Some(Ok(msg)) = ws_reader.next().await {
+                    if matches!(msg, Message::Close(_)) {
+                        break;
+                    }
+                    let _ = msg_tx_to_app.send((peer_id.clone(), msg)).await;
+                }
+
+                // Cleanup on connection drop
+                active_chats.lock().await.remove(&peer_id);
             }
         });
     }
@@ -140,15 +204,14 @@ pub fn get_onion_address(service: &RunningOnionService) -> Option<String> {
     service.onion_address().map(|name| name.to_string())
 }
 
-/// Connects to a remote .onion address via standard TCP or upgrades to a WebSocket stream
-/// i guess i have to use wss since the tor only uses TLS.
-/// TODO: should i return the writer and reader ?
+/// Connects to a remote .onion address and returns split reader/writer channels
 pub async fn connect_to_onion_address(
     client: Arc<TorClient<TokioNativeTlsRuntime>>,
     address: String,
     port: u16,
-    use_websocket: bool,
-) -> Result<()> {
+    active_chats: Arc<Mutex<HashMap<String, PeerTx>>>,
+    msg_tx_to_app: mpsc::Sender<(String, Message)>,
+) -> Result<PeerTx> {
     let target = format!("{}:{}", address, port);
 
     // Establish raw Tor stream
@@ -157,54 +220,41 @@ pub async fn connect_to_onion_address(
         .await
         .map_err(|_| P2PError::TorConnectioError)?;
 
-    if use_websocket {
-        // Upgrade the Tor DataStream to a persistent WebSocket client
-        let ws_url = format!("ws://{}", target);
-        // the client_async is used here since the docs says that the client_async is used typically
-        // for the connections already having tcp connection
-        let (mut ws_stream, _) = client_async(ws_url, stream)
-            .await
-            .map_err(|_| P2PError::TorConnectioError)?;
+    // Upgrade Tor DataStream to WebSocket client using ws:// protocol
+    let ws_url = format!("ws://{}", target);
+    let (ws_stream, _) = client_async(ws_url, stream)
+        .await
+        .map_err(|_| P2PError::TorConnectioError)?;
 
-        // Send a test text frame
-        ws_stream
-            .send(tokio_tungstenite::tungstenite::Message::Text(
-                "Hello over Tor WS".into(),
-            ))
-            .await
-            .map_err(|_| P2PError::TorConnectioError)?;
-    } else {
-        // Standard raw TCP stream over Tor
-        let (mut reader, mut writer) = tokio::io::split(stream);
+    let (mut ws_writer, mut ws_reader) = ws_stream.split();
+    let (tx, mut rx) = mpsc::channel::<Message>(100);
 
-        writer
-            .write_all(b"PING\n")
-            .await
-            .map_err(|_| P2PError::TorConnectioError)?;
+    // Register active channel handle
+    active_chats
+        .lock()
+        .await
+        .insert(address.clone(), tx.clone());
 
-        let mut response = [0u8; 1024];
-        let _bytes_read = reader
-            .read(&mut response)
-            .await
-            .map_err(|_| P2PError::TorConnectioError)?;
-    }
+    // Outbound Task
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if ws_writer.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
 
-    Ok(())
-}
+    // Inbound Task
+    let peer_addr = address.clone();
+    tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_reader.next().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+            let _ = msg_tx_to_app.send((peer_addr.clone(), msg)).await;
+        }
+        active_chats.lock().await.remove(&peer_addr);
+    });
 
-type Ppl = Arc<Mutex<HashMap<String, mpsc::Sender<Message>>>>;
-
-struct Chats {
-    chats: Ppl,
-    tor_client: TorClient<TokioNativeTlsRuntime>,
-}
-
-// For chats im yet to decide is i want to initilize the tor_client here or to keep them as
-// separate entities, (may be A P2PMaster will have client and chat lets see)
-impl Chats {
-    pub fn new() -> Self {}
-
-    pub fn connect_to_peer() {}
-
-    pub fn process_peer_msgs() {}
+    Ok(tx)
 }

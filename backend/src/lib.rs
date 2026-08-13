@@ -1,5 +1,7 @@
 uniffi::setup_scaffolding!();
 
+mod app_manager;
+mod chats;
 mod errors;
 mod message_queue;
 mod models;

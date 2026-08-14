@@ -350,6 +350,7 @@ dependencies = [
  "arti-client",
  "chrono",
  "futures",
+ "rand 0.10.2",
  "rusqlite",
  "thiserror 2.0.20",
  "tokio",

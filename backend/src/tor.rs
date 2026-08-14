@@ -1,3 +1,5 @@
+// TODO: modify these functions according to message_queue.rs
+
 use futures::{SinkExt, StreamExt};
 use std::{
     collections::HashMap,
@@ -25,6 +27,9 @@ type WsReader = futures::stream::SplitStream<WebSocketStream<TorDataStream>>;
 /// Channel handle used to push messages to an active peer connection loop
 pub type PeerTx = mpsc::Sender<Message>;
 
+// WARN: The msg_tx_to_app is type mpsc::Sender<String,Message> i feel like i should have an enum instad of Message to that the frontend
+// act accordingly, and mpsc::Sender? man will it work
+
 /// Managed Arti client state
 pub struct Client {
     pub tor_client: Arc<TorClient<TokioNativeTlsRuntime>>,
@@ -37,7 +42,7 @@ pub struct Client {
 impl Client {
     /// Until the cache and state dir are not changed the onion address will not changed
     pub async fn new(state_dir: String, cache_dir: String) -> Result<Self> {
-        let tor_client = onion_client(state_dir, cache_dir).await?;
+        let tor_client = onion_client(&state_dir, &cache_dir).await?;
         Ok(Self {
             tor_client,
             onion_service: None,
@@ -50,6 +55,7 @@ impl Client {
         &mut self,
         nickname: String,
         msg_tx_to_app: mpsc::Sender<(String, Message)>,
+        // TODO: Decide if tthe mpcs is okay or should i switch -> something the uniffi provides
     ) -> Result<String> {
         let (service, address) = host_onion_service(
             self.tor_client.clone(),
@@ -70,6 +76,10 @@ impl Client {
     }
 
     /// Send a message to an existing chat or connect if not present
+    // TODO: i guess i will expose a callback, what will flush all the messages - may be this is not
+    // good
+    // TODO: im passing Message type? shouldnt i send String and then convert it to Message or even
+    // better a ENUM and act accordingly
     pub async fn send_message(&self, target_address: &str, port: u16, msg: Message) -> Result<()> {
         let mut chats = self.active_chats.lock().await;
 
@@ -149,6 +159,8 @@ pub async fn host_onion_service(
 }
 
 /// Connection loop accepting incoming client streams and upgrading to WebSockets
+///
+// WARN: this will run until the stream is active
 async fn handle_incoming_connections(
     mut stream_handle: impl futures::Stream<Item = tor_hsservice::RendRequest> + Unpin + Send + 'static,
     active_chats: Arc<RwLock<HashMap<String, PeerTx>>>,
@@ -168,7 +180,8 @@ async fn handle_incoming_connections(
                 let (mut ws_writer, mut ws_reader) = ws_stream.split();
                 let (tx, mut rx) = mpsc::channel::<Message>(100);
 
-                // Placeholder identity until peer registers address during handshake
+                // WARN: Placeholder identity until peer registers address during handshake -> will this
+                // work
                 let peer_id = format!("peer_{}", rand::random::<u32>());
 
                 {
@@ -183,6 +196,8 @@ async fn handle_incoming_connections(
                         }
                     }
                 });
+
+                // WARN: i dont know if the uniffi provides the mspc::Sender or equivalent
 
                 // Reader Loop: Reads incoming frames and pushes to App Daemon
                 while let Some(Ok(msg)) = ws_reader.next().await {
@@ -222,6 +237,7 @@ pub async fn connect_to_onion_address(
 
     // Upgrade Tor DataStream to WebSocket client using ws:// protocol
     let ws_url = format!("ws://{}", target);
+    // WARN: i guess here the hand shake takes place -> learn the working of tungstenite
     let (ws_stream, _) = client_async(ws_url, stream)
         .await
         .map_err(|_| P2PError::TorConnectioError)?;
@@ -235,6 +251,7 @@ pub async fn connect_to_onion_address(
         .await
         .insert(address.clone(), tx.clone());
 
+    // i have a sender in the HashMap so i can write there and this msg will be written the ws stream
     // Outbound Task
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {

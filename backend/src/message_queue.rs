@@ -1,62 +1,46 @@
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 
-use crate::{
-    errors::PTPError,
-    models::{BackendMsg, ErrorMsg, FrontendMsg},
-};
+use futures::{SinkExt, channel::mpsc};
 
-// TODO: #1 - remember to push the pending tasks to the error to be processed later or to intimatate the frontend
-// TODO: #2 - maybe add a interface so that i can match types easyly "process_works"
-
-struct WorkQueue<T> {
-    sender: Sender<T>,
-    receiver: Receiver<T>,
+enum MsgBackend {
+    Msg(String),
 }
 
-impl<T> WorkQueue<T> {
-    pub fn new(limit: usize) -> Self {
-        let (s, r) = mpsc::channel(limit);
-        Self {
-            sender: s,
-            receiver: r,
-        }
-    }
-
-    pub fn sender(&self) -> Sender<T> {
-        self.sender.clone()
-    }
-
-    pub fn enqueue(&self, msg: T) -> Result<(), PTPError> {
-        self.sender
-            .try_send(msg)
-            .map_err(|_| PTPError::QueueBufferOverflowError)
-    }
+enum MsgFrontend {
+    Msg(String),
 }
 
-type BackendWorkQueue = WorkQueue<BackendMsg>;
-type FrontendWorkQueue = WorkQueue<FrontendMsg>;
-type ErrorWorkQueue = WorkQueue<ErrorMsg>;
-
-impl BackendWorkQueue {
-    pub async fn process_works(&mut self) {
-        while let Some(msg) = self.receiver.recv().await {
-            match msg {}
-        }
-    }
+trait MsgReceiver: Send + Sync {
+    fn msg_from_rust(&self, msg: MsgBackend);
 }
 
-impl FrontendWorkQueue {
-    pub async fn process_works(&mut self) {
-        while let Some(msg) = self.receiver.recv().await {
-            match msg {}
-        }
-    }
+struct P2PBridge {
+    rs_tx: mpsc::UnboundedSender<MsgFrontend>,
+    receiver: Arc<dyn MsgReceiver>,
 }
 
-impl ErrorWorkQueue {
-    pub async fn process_works(&mut self) {
-        while let Some(msg) = self.receiver.recv().await {
-            match msg {}
-        }
+impl P2PBridge {
+    fn new(receiver: Arc<dyn MsgReceiver>) -> Arc<Self> {
+        let (tx, mut rx) = mpsc::unbounded::<MsgFrontend>();
+        let bridge = Arc::new(Self {
+            rs_tx: tx,
+            receiver,
+        });
+
+        tokio::spawn(async move {
+            while let Ok(msg) = rx.recv().await {
+                // TODO: complete this code
+            }
+        });
+
+        bridge
+    }
+
+    fn send_to_backend(&self, msg: MsgFrontend) {
+        self.rs_tx.send(msg);
+    }
+
+    fn send_to_frontend(&self, msg: MsgBackend) {
+        self.receiver.msg_from_rust(msg);
     }
 }

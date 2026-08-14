@@ -1,3 +1,32 @@
+// ===================================================
+// On Frontend do
+// ===================================================
+
+// class Receiver : MsgReceiver {
+//     var channel = Channel<Message>(Channel.UNLIMITED)
+//
+//     override fun msgFromRust(msg: MsgBackend) {
+//         channel.trySend(msg)
+//     }
+// }
+
+// ---------------------------------------------------
+// Now you can create an instance of the class and use
+// it to send msgs to the backend - but first initialze the bridge
+// ---------------------------------------------------
+
+// val receiver = Receiver()
+// val bridge = P2PBridge(receiver)
+//
+// ---------------------------------------------------
+// Now you can use
+// ---------------------------------------------------
+
+// bridge.send_to_backend(FEmsg)
+
+// Remember that FEmsg should be of type MsgFrontend
+// ===================================================
+
 use std::sync::Arc;
 
 use futures::{SinkExt, channel::mpsc};

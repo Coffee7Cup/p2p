@@ -1,23 +1,18 @@
-// TODO: modify these functions according to message_queue.rs
-
 use futures::{SinkExt, StreamExt};
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::{Mutex, mpsc},
-};
+use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::{WebSocketStream, accept_async, client_async, tungstenite::Message};
-use tor_rtcompat::tokio::TokioNativeTlsRuntime;
+use tor_rtcompat::{Runtime, tokio::TokioNativeTlsRuntime};
 
 use arti_client::{
     TorClient, TorClientConfig, config::CfgPath, config::onion_service::OnionServiceConfig,
 };
 use tor_hsservice::RunningOnionService;
 
-use crate::{Result, errors::P2PError};
+use crate::{Result, errors::P2PError, message_queue::FrontendMsg, message_queue::P2PBridge};
 
 // Type aliases for WebSocket read/write halves over Tor stream
 type TorDataStream = arti_client::DataStream;
@@ -26,13 +21,9 @@ type WsReader = futures::stream::SplitStream<WebSocketStream<TorDataStream>>;
 
 /// Channel handle used to push messages to an active peer connection loop
 pub type PeerTx = mpsc::Sender<Message>;
-
-// WARN: The msg_tx_to_app is type mpsc::Sender<String,Message> i feel like i should have an enum instad of Message to that the frontend
-// act accordingly, and mpsc::Sender? man will it work
-
 /// Managed Arti client state
 pub struct Client {
-    pub tor_client: Arc<TorClient<TokioNativeTlsRuntime>>,
+    pub tor_client: Arc<TorClient<R: Runtime>>,
     pub onion_service: Option<Arc<RunningOnionService>>,
     pub onion_address: Option<String>,
     // Persistent active chat connections indexed by target onion address
@@ -42,7 +33,7 @@ pub struct Client {
 impl Client {
     /// Until the cache and state dir are not changed the onion address will not changed
     pub async fn new(state_dir: String, cache_dir: String) -> Result<Self> {
-        let tor_client = onion_client(&state_dir, &cache_dir).await?;
+        let tor_client = onion_client(state_dir, cache_dir).await?;
         Ok(Self {
             tor_client,
             onion_service: None,
@@ -51,17 +42,12 @@ impl Client {
         })
     }
 
-    pub async fn start_service(
-        &mut self,
-        nickname: String,
-        msg_tx_to_app: mpsc::Sender<(String, Message)>,
-        // TODO: Decide if tthe mpcs is okay or should i switch -> something the uniffi provides
-    ) -> Result<String> {
+    pub async fn start_service(&mut self, nickname: String, bridge: P2PBridge) -> Result<String> {
         let (service, address) = host_onion_service(
             self.tor_client.clone(),
             nickname,
             self.active_chats.clone(),
-            msg_tx_to_app,
+            bridge,
         )
         .await?;
 
@@ -71,20 +57,24 @@ impl Client {
     }
 
     /// Returns the active .onion address if hosted
-    pub fn get_onion_address(&self) -> Option<String> {
-        self.onion_address.clone()
+    pub fn get_onion_address(&self) -> Option<&str> {
+        if let Some(ref addr) = self.onion_address {
+            return Some(addr.as_str());
+        }
+        None
     }
 
     /// Send a message to an existing chat or connect if not present
-    // TODO: i guess i will expose a callback, what will flush all the messages - may be this is not
-    // good
-    // TODO: im passing Message type? shouldnt i send String and then convert it to Message or even
-    // better a ENUM and act accordingly
-    pub async fn send_message(&self, target_address: &str, port: u16, msg: Message) -> Result<()> {
+    pub async fn send_message(
+        &self,
+        target_address: &str,
+        port: u16,
+        msg: FrontendMsg,
+    ) -> Result<()> {
         let mut chats = self.active_chats.lock().await;
 
         if let Some(tx) = chats.get(target_address) {
-            tx.send(msg)
+            tx.send(msg.into())
                 .await
                 .map_err(|_| P2PError::TorConnectioError)?;
             Ok(())
@@ -96,17 +86,13 @@ impl Client {
 
 /// Initializes and bootstraps the Arti Tor client runtime
 pub async fn onion_client(
-    state_dir: &str,
-    cache_dir: &str,
+    state_dir: String,
+    cache_dir: String,
 ) -> Result<Arc<TorClient<TokioNativeTlsRuntime>>> {
     let mut config_builder = TorClientConfig::builder();
 
-    config_builder
-        .storage()
-        .state_dir(CfgPath::new_literal(state_dir));
-    config_builder
-        .storage()
-        .cache_dir(CfgPath::new_literal(cache_dir));
+    config_builder.storage().state_dir(CfgPath::new(state_dir));
+    config_builder.storage().cache_dir(CfgPath::new(cache_dir));
 
     let config = config_builder
         .build()
@@ -124,7 +110,7 @@ pub async fn host_onion_service(
     client: Arc<TorClient<TokioNativeTlsRuntime>>,
     nickname: String,
     active_chats: Arc<RwLock<HashMap<String, PeerTx>>>,
-    msg_tx_to_app: mpsc::Sender<(String, Message)>,
+    bridge: P2PBridge,
 ) -> Result<(Arc<RunningOnionService>, String)> {
     let service_config = OnionServiceConfig::builder()
         .nickname(
@@ -152,23 +138,21 @@ pub async fn host_onion_service(
     tokio::spawn(handle_incoming_connections(
         stream_handle,
         active_chats,
-        msg_tx_to_app,
+        bridge,
     ));
 
     Ok((Arc::new(service), onion_address))
 }
 
 /// Connection loop accepting incoming client streams and upgrading to WebSockets
-///
-// WARN: this will run until the stream is active
 async fn handle_incoming_connections(
     mut stream_handle: impl futures::Stream<Item = tor_hsservice::RendRequest> + Unpin + Send + 'static,
     active_chats: Arc<RwLock<HashMap<String, PeerTx>>>,
-    msg_tx_to_app: mpsc::Sender<(String, Message)>,
+    bridge: P2PBridge,
 ) {
     while let Some(rend_request) = stream_handle.next().await {
         let active_chats = active_chats.clone();
-        let msg_tx_to_app = msg_tx_to_app.clone();
+        let bridge_c = bridge.clone();
 
         tokio::spawn(async move {
             let stream = match rend_request.accept().await {
@@ -197,18 +181,16 @@ async fn handle_incoming_connections(
                     }
                 });
 
-                // WARN: i dont know if the uniffi provides the mspc::Sender or equivalent
-
                 // Reader Loop: Reads incoming frames and pushes to App Daemon
                 while let Some(Ok(msg)) = ws_reader.next().await {
                     if matches!(msg, Message::Close(_)) {
                         break;
                     }
-                    let _ = msg_tx_to_app.send((peer_id.clone(), msg)).await;
+                    let _ = bridge_c.send_to_frontend(msg.into()).await;
                 }
 
                 // Cleanup on connection drop
-                active_chats.lock().await.remove(&peer_id);
+                active_chats.write().remove(&peer_id);
             }
         });
     }
@@ -225,7 +207,7 @@ pub async fn connect_to_onion_address(
     address: String,
     port: u16,
     active_chats: Arc<Mutex<HashMap<String, PeerTx>>>,
-    msg_tx_to_app: mpsc::Sender<(String, Message)>,
+    bridge: P2PBridge,
 ) -> Result<PeerTx> {
     let target = format!("{}:{}", address, port);
 
@@ -268,7 +250,7 @@ pub async fn connect_to_onion_address(
             if matches!(msg, Message::Close(_)) {
                 break;
             }
-            let _ = msg_tx_to_app.send((peer_addr.clone(), msg)).await;
+            let _ = bridge.send_to_frontend(msg.into()).await;
         }
         active_chats.lock().await.remove(&peer_addr);
     });

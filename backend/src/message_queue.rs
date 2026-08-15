@@ -27,33 +27,49 @@
 // Remember that FEmsg should be of type MsgFrontend
 // ===================================================
 
+// TODO: Add the uniffi macros
+
 use std::sync::Arc;
 
 use futures::{SinkExt, channel::mpsc};
+use tokio_tungstenite::tungstenite::Message;
 
-enum MsgBackend {
+pub enum BackendMsg {
     Msg(String),
 }
 
-enum MsgFrontend {
+// TODO: COmplete this
+impl From<Message> for BackendMsg {
+    fn from(msg: Message) -> Self {
+        Self::Msg("TODO".to_string())
+    }
+}
+
+pub enum FrontendMsg {
     Msg(String),
+}
+
+impl From<FrontendMsg> for Message {
+    fn from(fmsg: FrontendMsg) -> Self {
+        Self {}
+    }
 }
 
 trait MsgReceiver: Send + Sync {
-    fn msg_from_rust(&self, msg: MsgBackend);
+    fn msg_from_rust(&self, msg: BackendMsg);
 }
 
-struct P2PBridge {
-    rs_tx: mpsc::UnboundedSender<MsgFrontend>,
-    receiver: Arc<dyn MsgReceiver>,
+pub struct P2PBridge {
+    rs_tx: mpsc::UnboundedSender<FrontendMsg>,
+    sender: Arc<dyn MsgReceiver>,
 }
 
 impl P2PBridge {
     fn new(receiver: Arc<dyn MsgReceiver>) -> Arc<Self> {
-        let (tx, mut rx) = mpsc::unbounded::<MsgFrontend>();
+        let (tx, mut rx) = mpsc::unbounded::<FrontendMsg>();
         let bridge = Arc::new(Self {
             rs_tx: tx,
-            receiver,
+            sender: receiver,
         });
 
         tokio::spawn(async move {
@@ -65,11 +81,12 @@ impl P2PBridge {
         bridge
     }
 
-    fn send_to_backend(&self, msg: MsgFrontend) {
+    //this for frontedn to use
+    fn send_to_backend(&self, msg: FrontendMsg) {
         self.rs_tx.send(msg);
     }
 
-    fn send_to_frontend(&self, msg: MsgBackend) {
-        self.receiver.msg_from_rust(msg);
+    pub fn send_to_frontend(&self, msg: BackendMsg) {
+        self.sender.msg_from_rust(msg);
     }
 }

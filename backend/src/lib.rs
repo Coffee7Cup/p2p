@@ -1,10 +1,10 @@
 uniffi::setup_scaffolding!();
 
+// WARN: This is the worst error handled code Do Something
+
 mod app_manager;
-mod chats;
 mod errors;
 mod message_queue;
-mod models;
 mod tor;
 
 #[derive(uniffi::Object)]
@@ -12,7 +12,7 @@ struct Greeter {
     name: String,
 }
 
-pub type Result<T> = Result<T, errors::P2PError>;
+pub type Result<T> = std::result::Result<T, errors::P2PError>;
 
 #[uniffi::export]
 impl Greeter {

@@ -1,4 +1,5 @@
 use futures::{SinkExt, StreamExt};
+use safelog::{DebugRedacted, DisplayRedacted};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, mpsc};
@@ -60,11 +61,11 @@ impl Client {
     }
 
     /// Returns the active .onion address if hosted
-    // TODO: i guess i have to give Slug or HsId -> Slug -> String
+    // TODO: what does display_unredacted do && is display_redacted is better ?
     pub fn get_onion_address_string(&self) -> Option<String> {
         if let Some(ref addr) = self.onion_address {
             // let hsid = format!("{}", addr);
-            let hsid = addr.to_string();
+            let hsid = addr.display_unredacted().to_string();
             return Some(hsid);
         }
         None
@@ -210,7 +211,9 @@ async fn handle_incoming_connections(
 ///
 // TODO: HsId -> String
 pub fn get_onion_address(service: &RunningOnionService) -> Option<String> {
-    service.onion_address().map(|name| name.to_string())
+    service
+        .onion_address()
+        .map(|name| name.display_unredacted().to_string())
 }
 
 /// Connects to a remote .onion address and returns split reader/writer channels

@@ -352,11 +352,11 @@ dependencies = [
  "futures",
  "rand 0.10.2",
  "rusqlite",
+ "safelog",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
  "tor-cell",
- "tor-hscrypto",
  "tor-hsservice",
  "tor-rtcompat",
  "uniffi",
@@ -421,15 +421,6 @@ dependencies = [
  "radium",
  "tap",
  "wyz",
-]
-
-[[package]]
-name = "blake2"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
-dependencies = [
- "digest 0.10.7",
 ]
 
 [[package]]
@@ -1180,33 +1171,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "dynasm"
-version = "5.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd358e74d2f8d71a11b7a2c51c67ad5df3de06003b0596875e47bc09126c894e"
-dependencies = [
- "bitflags 2.13.1",
- "byteorder",
- "lazy_static",
- "proc-macro-error3",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "dynasmrt"
-version = "5.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6efe03f6bd356ae85eeea7ee14c2bf54e664a949d089d238364b5a99afbc4116"
-dependencies = [
- "byteorder",
- "dynasm",
- "fnv",
- "memmap2",
-]
-
-[[package]]
 name = "ecdsa"
 version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1336,19 +1300,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
-name = "equix"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8579db3722b460bc5e9e25590333c592cece08e410d6e0f70ff8307f603d8a5d"
-dependencies = [
- "arrayvec",
- "hashx",
- "num-traits",
- "thiserror 2.0.20",
- "visibility",
-]
-
-[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1441,12 +1392,6 @@ name = "find-msvc-tools"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26b73573e6edcd2af0cdf47bd6cb58f0b3839491263c314eaad1ccf24430e1de"
-
-[[package]]
-name = "fixed-capacity-vec"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b31a14f5ee08ed1a40e1252b35af18bed062e3f39b69aab34decde36bc43e40"
 
 [[package]]
 name = "flate2"
@@ -1768,21 +1713,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
 dependencies = [
  "hashbrown 0.15.5",
-]
-
-[[package]]
-name = "hashx"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e1a862d146b32838e984850a27e3f6c5551fba240c141b2e342da1f36963048"
-dependencies = [
- "arrayvec",
- "blake2",
- "dynasmrt",
- "fixed-capacity-vec",
- "hex",
- "rand_core 0.10.1",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2919,28 +2849,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
 dependencies = [
  "toml_edit 0.25.13+spec-1.1.0",
-]
-
-[[package]]
-name = "proc-macro-error-attr3"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0084e6206a967a2dad822180626b2f6b07a3b379325e8f1ec0438e33a469ba7"
-dependencies = [
- "proc-macro2",
- "quote",
-]
-
-[[package]]
-name = "proc-macro-error3"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cf066225f2373bc711684792b69bdeac0356019b007e721090c24d92d5d5a50"
-dependencies = [
- "proc-macro-error-attr3",
- "proc-macro2",
- "quote",
- "syn 3.0.3",
 ]
 
 [[package]]
@@ -4662,14 +4570,11 @@ version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f6438a115a512791dc1309ab8a70b969c89631914d8aa0cfa35cdb20d5d33b7"
 dependencies = [
- "arrayvec",
- "blake2",
  "cipher 0.5.2",
  "data-encoding",
  "derive-deftly",
  "derive_more",
  "digest 0.10.7",
- "equix",
  "hex",
  "humantime",
  "itertools",

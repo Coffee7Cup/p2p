@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 arti-client = { version = "0.45.0", features = [
   "onion-service-service",
   "onion-service-client",
+  "experimental-api",
 ] }
 chrono = "0.4.45"
 thiserror = "2.0.19"
@@ -21,6 +22,8 @@ tor-hsservice = "0.45.0"
 tokio-tungstenite = "0.30.0"
 futures = "0.3.33"
 rand = "0.10.2"
+tor-cell = "0.45.0"
+tor-hscrypto = { version = "0.45.0", features = ["experimental"] }
 
 [build-dependencies]
 uniffi = { version = "0.32.0", features = ["build"] }

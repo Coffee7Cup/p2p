@@ -1,16 +1,15 @@
 use futures::{SinkExt, StreamExt};
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
-use tokio::sync::{Mutex, mpsc};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_tungstenite::{WebSocketStream, accept_async, client_async, tungstenite::Message};
-use tor_rtcompat::{Runtime, tokio::TokioNativeTlsRuntime};
+use tor_cell::relaycell::msg::Connected;
+use tor_rtcompat::PreferredRuntime;
 
 use arti_client::{
-    TorClient, TorClientConfig, config::CfgPath, config::onion_service::OnionServiceConfig,
+    HsId, TorClient, TorClientConfig, config::CfgPath, config::onion_service::OnionServiceConfig,
 };
-use tor_hsservice::RunningOnionService;
+use tor_hsservice::{RunningOnionService, StreamRequest};
 
 use crate::{Result, errors::P2PError, message_queue::FrontendMsg, message_queue::P2PBridge};
 
@@ -23,9 +22,9 @@ type WsReader = futures::stream::SplitStream<WebSocketStream<TorDataStream>>;
 pub type PeerTx = mpsc::Sender<Message>;
 /// Managed Arti client state
 pub struct Client {
-    pub tor_client: Arc<TorClient<R: Runtime>>,
+    pub tor_client: Arc<TorClient<PreferredRuntime>>,
     pub onion_service: Option<Arc<RunningOnionService>>,
-    pub onion_address: Option<String>,
+    pub onion_address: Option<HsId>,
     // Persistent active chat connections indexed by target onion address
     pub active_chats: Arc<RwLock<HashMap<String, PeerTx>>>,
 }
@@ -42,7 +41,11 @@ impl Client {
         })
     }
 
-    pub async fn start_service(&mut self, nickname: String, bridge: P2PBridge) -> Result<String> {
+    pub async fn start_service(
+        &mut self,
+        nickname: String,
+        bridge: Arc<P2PBridge>,
+    ) -> Result<HsId> {
         let (service, address) = host_onion_service(
             self.tor_client.clone(),
             nickname,
@@ -57,9 +60,12 @@ impl Client {
     }
 
     /// Returns the active .onion address if hosted
-    pub fn get_onion_address(&self) -> Option<&str> {
+    // TODO: i guess i have to give Slug or HsId -> Slug -> String
+    pub fn get_onion_address_string(&self) -> Option<String> {
         if let Some(ref addr) = self.onion_address {
-            return Some(addr.as_str());
+            // let hsid = format!("{}", addr);
+            let hsid = addr.to_string();
+            return Some(hsid);
         }
         None
     }
@@ -71,7 +77,7 @@ impl Client {
         port: u16,
         msg: FrontendMsg,
     ) -> Result<()> {
-        let mut chats = self.active_chats.lock().await;
+        let chats = self.active_chats.write().await;
 
         if let Some(tx) = chats.get(target_address) {
             tx.send(msg.into())
@@ -88,7 +94,7 @@ impl Client {
 pub async fn onion_client(
     state_dir: String,
     cache_dir: String,
-) -> Result<Arc<TorClient<TokioNativeTlsRuntime>>> {
+) -> Result<Arc<TorClient<PreferredRuntime>>> {
     let mut config_builder = TorClientConfig::builder();
 
     config_builder.storage().state_dir(CfgPath::new(state_dir));
@@ -102,35 +108,38 @@ pub async fn onion_client(
         .await
         .map_err(|_| P2PError::TorConnectioError)?;
 
-    Ok(Arc::new(client))
+    Ok(client)
 }
 
 /// Hosts an Onion Service and spawns a background listener loop to accept multiple incoming streams
+// TODO: Research why i need a nick name
 pub async fn host_onion_service(
-    client: Arc<TorClient<TokioNativeTlsRuntime>>,
+    client: Arc<TorClient<PreferredRuntime>>,
     nickname: String,
     active_chats: Arc<RwLock<HashMap<String, PeerTx>>>,
-    bridge: P2PBridge,
-) -> Result<(Arc<RunningOnionService>, String)> {
+    bridge: Arc<P2PBridge>,
+) -> Result<(Arc<RunningOnionService>, HsId)> {
     let service_config = OnionServiceConfig::builder()
         .nickname(
             nickname
                 .parse()
-                .map_err(|_| P2PError::OnionConnectioError)?,
+                .map_err(|_| P2PError::OnionConnectionError)?,
         )
         .build()
-        .map_err(|_| P2PError::OnionConnectioError)?;
+        .map_err(|_| P2PError::OnionConnectionError)?;
 
     // Launch service and retrieve incoming requests
-    let (service, stream_requests) = client
+    let (service, stream_requests) = match client
         .launch_onion_service(service_config)
-        .await
-        .map_err(|_| P2PError::OnionConnectioError)?;
-
+        .map_err(|_| P2PError::OnionConnectionError)?
+    {
+        Some(result) => result,
+        // TODO: pass the error to frontend
+        None => todo!(),
+    };
     let onion_address = service
-        .onion_name()
-        .ok_or(P2PError::OnionConnectioError)?
-        .to_string();
+        .onion_address()
+        .ok_or(P2PError::OnionConnectionError)?;
 
     let stream_handle = tor_hsservice::handle_rend_requests(stream_requests);
 
@@ -141,21 +150,22 @@ pub async fn host_onion_service(
         bridge,
     ));
 
-    Ok((Arc::new(service), onion_address))
+    Ok((service, onion_address))
 }
 
 /// Connection loop accepting incoming client streams and upgrading to WebSockets
 async fn handle_incoming_connections(
-    mut stream_handle: impl futures::Stream<Item = tor_hsservice::RendRequest> + Unpin + Send + 'static,
+    mut stream_handle: impl futures::Stream<Item = StreamRequest> + Unpin + Send + 'static,
     active_chats: Arc<RwLock<HashMap<String, PeerTx>>>,
-    bridge: P2PBridge,
+    bridge: Arc<P2PBridge>,
 ) {
     while let Some(rend_request) = stream_handle.next().await {
         let active_chats = active_chats.clone();
         let bridge_c = bridge.clone();
 
         tokio::spawn(async move {
-            let stream = match rend_request.accept().await {
+            // TODO: What is connected
+            let stream = match rend_request.accept(Connected::new_empty()).await {
                 Ok(s) => s,
                 Err(_) => return,
             };
@@ -169,7 +179,7 @@ async fn handle_incoming_connections(
                 let peer_id = format!("peer_{}", rand::random::<u32>());
 
                 {
-                    active_chats.lock().await.insert(peer_id.clone(), tx);
+                    active_chats.write().await.insert(peer_id.clone(), tx);
                 }
 
                 // Writer Loop: Flushes outbound messages to network
@@ -186,24 +196,26 @@ async fn handle_incoming_connections(
                     if matches!(msg, Message::Close(_)) {
                         break;
                     }
-                    let _ = bridge_c.send_to_frontend(msg.into()).await;
+                    bridge_c.send_to_frontend(msg.into());
                 }
 
                 // Cleanup on connection drop
-                active_chats.write().remove(&peer_id);
+                active_chats.write().await.remove(&peer_id);
             }
         });
     }
 }
 
 /// Helper function to retrieve an address directly from a RunningOnionService instance
+///
+// TODO: HsId -> String
 pub fn get_onion_address(service: &RunningOnionService) -> Option<String> {
     service.onion_address().map(|name| name.to_string())
 }
 
 /// Connects to a remote .onion address and returns split reader/writer channels
 pub async fn connect_to_onion_address(
-    client: Arc<TorClient<TokioNativeTlsRuntime>>,
+    client: Arc<TorClient<PreferredRuntime>>,
     address: String,
     port: u16,
     active_chats: Arc<Mutex<HashMap<String, PeerTx>>>,
@@ -250,7 +262,7 @@ pub async fn connect_to_onion_address(
             if matches!(msg, Message::Close(_)) {
                 break;
             }
-            let _ = bridge.send_to_frontend(msg.into()).await;
+            bridge.send_to_frontend(msg.into());
         }
         active_chats.lock().await.remove(&peer_addr);
     });

@@ -72,16 +72,12 @@ impl Client {
     }
 
     /// Send a message to an existing chat or connect if not present
-    pub async fn send_message(
-        &self,
-        target_address: &str,
-        port: u16,
-        msg: FrontendMsg,
-    ) -> Result<()> {
+    pub async fn send_message(&self, target_address: &str, port: u16, msg: String) -> Result<()> {
         let chats = self.active_chats.write().await;
 
+        let msg_t = Message::Text(msg.into());
         if let Some(tx) = chats.get(target_address) {
-            tx.send(msg.into())
+            tx.send(msg_t)
                 .await
                 .map_err(|_| P2PError::TorConnectioError)?;
             Ok(())
@@ -113,7 +109,7 @@ pub async fn onion_client(
 }
 
 /// Hosts an Onion Service and spawns a background listener loop to accept multiple incoming streams
-// TODO: Research why i need a nick name
+// TODO: Research why i need a nick name -> The nickname used to look up this service’s keys, state, configuration, etc.
 pub async fn host_onion_service(
     client: Arc<TorClient<PreferredRuntime>>,
     nickname: String,
@@ -155,6 +151,9 @@ pub async fn host_onion_service(
 }
 
 /// Connection loop accepting incoming client streams and upgrading to WebSockets
+///
+// WARN: The tor connections do not need any onion address to connect, u host the connection to
+// accept the connection without knowing who they are -> hence i can send the first msgs (Like a ping) to know everything i want
 async fn handle_incoming_connections(
     mut stream_handle: impl futures::Stream<Item = StreamRequest> + Unpin + Send + 'static,
     active_chats: Arc<RwLock<HashMap<String, PeerTx>>>,
@@ -171,6 +170,7 @@ async fn handle_incoming_connections(
                 Err(_) => return,
             };
 
+            //Here the Ws is taking rge stream and converting it into a ws
             if let Ok(ws_stream) = accept_async(stream).await {
                 let (mut ws_writer, mut ws_reader) = ws_stream.split();
                 let (tx, mut rx) = mpsc::channel::<Message>(100);

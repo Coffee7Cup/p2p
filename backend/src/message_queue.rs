@@ -34,25 +34,29 @@ use std::sync::Arc;
 use futures::{SinkExt, channel::mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
-pub enum BackendMsg {
-    Msg(String),
+pub enum TorStatus {
+    Online,
+    Offline,
+    Connecting,
 }
 
-// TODO: COmplete this
+pub enum BackendMsg {
+    ChatMsg(String),
+    Error(String),
+    TorStatus(TorStatus),
+}
+
 impl From<Message> for BackendMsg {
     fn from(msg: Message) -> Self {
-        Self::Msg("TODO".to_string())
+        match msg {
+            Message::Text(text) => Self::ChatMsg(text.to_string()),
+            _ => Self::Error("Cannot read the message".to_string()),
+        }
     }
 }
 
 pub enum FrontendMsg {
-    Msg(String),
-}
-
-impl From<FrontendMsg> for Message {
-    fn from(fmsg: FrontendMsg) -> Self {
-        Self {}
-    }
+    MsgToChat((String, String)),
 }
 
 trait MsgReceiver: Send + Sync {
@@ -82,7 +86,7 @@ impl P2PBridge {
     }
 
     //this for frontedn to use
-    fn send_to_backend(&self, msg: FrontendMsg) {
+    fn send_to_backend(&mut self, msg: FrontendMsg) {
         self.rs_tx.send(msg);
     }
 

@@ -34,6 +34,10 @@ use std::sync::Arc;
 use futures::{SinkExt, channel::mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::Result;
+
+use crate::tor::Client;
+
 pub enum TorStatus {
     Online,
     Offline,
@@ -93,4 +97,8 @@ impl P2PBridge {
     pub fn send_to_frontend(&self, msg: BackendMsg) {
         self.sender.msg_from_rust(msg);
     }
+}
+// i guess this will be droped out of memory, I might have to return the Client object
+async fn init(state_dir: String, cache_dir: String, bridge: Arc<P2PBridge>) -> Result<Arc<Client>> {
+    Client::new(state_dir, cache_dir, bridge).await
 }

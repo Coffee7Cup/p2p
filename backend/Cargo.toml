@@ -15,7 +15,7 @@ arti-client = { version = "0.45.0", features = [
 chrono = "0.4.45"
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["tokio-macros", "net", "rt"] }
-uniffi = { version = "0.32.0", features = ["cli"] }
+uniffi = { version = "0.32.0", features = ["cli", "tokio"] }
 rusqlite = { version = "0.36.0", features = ["bundled"] }
 tor-rtcompat = "0.45.0"
 tor-hsservice = "0.45.0"
@@ -24,6 +24,8 @@ futures = "0.3.33"
 rand = "0.10.2"
 tor-cell = "0.45.0"
 safelog = "0.9.1"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
 
 [build-dependencies]
 uniffi = { version = "0.32.0", features = ["build"] }

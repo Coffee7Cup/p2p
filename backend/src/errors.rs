@@ -1,13 +1,16 @@
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(uniffi::Error, Error, Debug)]
 pub enum P2PError {
-    #[error("Error While Connecting to TOR")]
-    TorConnectioError,
+    #[error("Failed to bootstrap and connect to the Tor network: {0}")]
+    TorConnectionError(String),
 
-    #[error("Backend WorkQueue is full")]
-    QueueBufferOverflowError,
+    #[error("Failed to initialize or connect to the onion service: {0}")]
+    OnionConnectionError(String),
 
-    #[error("Error while connecting to onion address")]
-    OnionConnectionError,
+    #[error("Failed to send message over the WebSocket stream: {0}")]
+    MessageSendError(String),
+
+    #[error("Chat connection not found for address: {0}")]
+    ChatNotFoundError(String),
 }

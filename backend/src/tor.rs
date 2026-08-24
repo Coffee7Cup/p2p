@@ -62,13 +62,11 @@ pub struct Client {
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-impl Client {
-    #[uniffi::constructor]
-    pub async fn new(
-        state_dir: String,
-        cache_dir: String,
-        receiver: Arc<dyn MsgReceiver>,
-    ) -> Result<Arc<Self>> {
+pub async fn create_client(
+    state_dir: String,
+    cache_dir: String,
+    receiver: Arc<dyn MsgReceiver>,
+) -> Result<Arc<Client>> {
         info!("Initializing Tor client...");
         receiver.msg_from_rust(BackendMsg::TorStatus {
             status: TorStatus::Connecting,
@@ -78,10 +76,9 @@ impl Client {
         config_builder.storage().state_dir(CfgPath::new(state_dir));
         config_builder.storage().cache_dir(CfgPath::new(cache_dir));
 
-        let config = config_builder.build().map_err(|e| {
-            error!("Failed to build Tor config: {}", e);
-            P2PError::TorConnectionError(e.to_string())
-        })?;
+        let config = config_builder
+            .build()
+            .map_err(|e| P2PError::TorConnectionError(e.to_string()))?;
 
         let tor_client = TorClient::create_bootstrapped(config).await.map_err(|e| {
             error!("Failed to bootstrap Tor client: {}", e);
@@ -91,12 +88,11 @@ impl Client {
             P2PError::TorConnectionError(e.to_string())
         })?;
 
-        info!("Tor client successfully bootstrapped.");
         receiver.msg_from_rust(BackendMsg::TorStatus {
             status: TorStatus::Online,
         });
 
-        Ok(Arc::new(Self {
+        Ok(Arc::new(Client {
             tor_client,
             onion_service: Arc::new(RwLock::new(None)),
             onion_address: Arc::new(RwLock::new(None)),
@@ -105,14 +101,17 @@ impl Client {
         }))
     }
 
+#[uniffi::export(async_runtime = "tokio")]
+impl Client {
     pub async fn start_service(self: Arc<Self>, nickname: String) -> Result<String> {
         info!("Starting Onion Service with nickname: {}", nickname);
 
         let service_config = OnionServiceConfig::builder()
-            .nickname(nickname.parse().map_err(|_| {
-                error!("Invalid nickname provided");
-                P2PError::OnionConnectionError("Invalid nickname".to_string())
-            })?)
+            .nickname(
+                nickname
+                    .parse()
+                    .map_err(|_| P2PError::OnionConnectionError("Invalid nickname".to_string()))?,
+            )
             .build()
             .map_err(|e| {
                 error!("Failed to build Onion Service config: {}", e);
@@ -311,3 +310,36 @@ impl Client {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_tungstenite::tungstenite::protocol::Message;
+
+    #[test]
+    fn test_backend_msg_from_text() {
+        let text_msg = Message::Text(Utf8Bytes::from("Hello, World!"));
+        let backend_msg: BackendMsg = text_msg.into();
+
+        match backend_msg {
+            BackendMsg::ChatMsg { text } => {
+                assert_eq!(text, "Hello, World!");
+            }
+            _ => panic!("Expected ChatMsg"),
+        }
+    }
+
+    #[test]
+    fn test_backend_msg_from_other() {
+        let binary_msg = Message::Binary(vec![1, 2, 3].into());
+        let backend_msg: BackendMsg = binary_msg.into();
+
+        match backend_msg {
+            BackendMsg::Error { message } => {
+                assert_eq!(message, "Cannot read the message");
+            }
+            _ => panic!("Expected Error"),
+        }
+    }
+}
+
